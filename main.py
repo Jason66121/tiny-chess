@@ -364,7 +364,10 @@ def evaluate(pos):
         score += 30
     if bb >= 2:
         score -= 30
-    return score if pos.turn > 0 else -score
+    # Contempt: the side to move values playing on over a draw (repetition
+    # scores 0), so a 0-score shuffle loses to any non-repeating move when
+    # the position is equal or better, but a lost position still takes the draw.
+    return (score if pos.turn > 0 else -score) + 25
 
 
 # ---- search ----------------------------------------------------------------
@@ -545,7 +548,7 @@ def move_to_uci(mv):
 
 
 ENV_URL =  os.environ.get("MAKEFUN_ENV_URL") or sys.exit("MAKEFUN_ENV_URL is not set")
-NODES = int(os.environ.get("CHESS_NODES", "30000"))
+NODES = int(os.environ.get("CHESS_NODES", "60000"))
 
 
 def post(path, body):
