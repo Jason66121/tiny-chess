@@ -344,16 +344,26 @@ def legal_moves(pos):
 def evaluate(pos):
     b = pos.b
     score = 0
+    wb = bb = 0
     for sq in range(128):
         p = b[sq]
         if p == 0 or p == 7:
             continue
         ap = abs(p)
+        if ap == 3:
+            if p > 0:
+                wb += 1
+            else:
+                bb += 1
         i64 = sq64(sq)
         # Tables are written rank 8 first: white reads them flipped (i^56),
         # black reads them as written (its 7th rank is white's 2nd).
         v = VAL[ap] + PSTS[ap][(i64 ^ 56) if p > 0 else i64]
         score += v if p > 0 else -v
+    if wb >= 2:
+        score += 30
+    if bb >= 2:
+        score -= 30
     return score if pos.turn > 0 else -score
 
 
@@ -375,16 +385,17 @@ def zobrist(pos):
 
 
 class Searcher:
-    def __init__(self, nodes=30000):
+    def __init__(self, nodes=60000):
         self.nodes = nodes
         self.count = 0
         self.tt = {}
         self.killers = {}
+        self.history = set()
 
-    def search_root(self, pos, legal):
+    def search_root(self, pos, legal, history=()):
         self.count = 0
-        self.tt = {}
         self.killers = {}
+        self.history = set(history)
         best = legal[0]
         best_val = -10**9
         # iterative deepening: keep deepening while the node budget allows
@@ -436,10 +447,27 @@ class Searcher:
         self.count += 1
         if self.count > self.nodes:
             return evaluate(pos)
+        h = zobrist(pos)
+        # A position already seen in the game is a draw: avoid it when ahead,
+        # seek it when behind. Checked before the TT so a history draw is
+        # never stored as a real score.
+        if h in self.history:
+            return 0
+        in_check = attacked(pos.b, king_square(pos.b, pos.turn), -pos.turn)
+        if in_check:
+            depth += 1  # check extension: see the tactic through
         if depth <= 0:
             return self._quiesce(pos, alpha, beta, ply)
+        # Null-move pruning: skip a move (not in check, enough depth left);
+        # a fail-high means this position is too good to need the move.
+        if depth >= 3 and not in_check and beta < 99900:
+            null_pos = Pos(pos.b, -pos.turn, pos.castle, -1)
+            v = -self._search(null_pos, depth - 3, -beta, -beta + 1, ply + 1)
+            if v >= beta:
+                return beta
+            if self.count > self.nodes:
+                return evaluate(pos)
         # transposition table
-        h = zobrist(pos)
         ent = self.tt.get(h)
         tt_move = None
         if ent and ent[0] >= depth:
@@ -452,7 +480,7 @@ class Searcher:
                 return val
         moves = legal_moves(pos)
         if not moves:
-            if attacked(pos.b, king_square(pos.b, pos.turn), -pos.turn):
+            if in_check:
                 return -100000 + ply
             return 0
         ordered = self._order(pos, moves, ply)
@@ -475,8 +503,6 @@ class Searcher:
                     if pos.b[mv[1]] == 0:
                         self.killers[ply] = mv
                     break
-        flag = 0 if best <= orig_alpha else 1 if best >= beta else 2
-        # store: flag 0 exact, 1 lower, 2 upper (best vs orig_alpha/beta)
         if best >= beta:
             flag = 1
         elif best <= orig_alpha:
@@ -544,6 +570,24 @@ def uci_to_move(uci):
     return (f, t, pr)
 
 
+def history_hashes(start_fen, moves):
+    """Zobrist hashes of every position in the game so far, from the start."""
+    pos = parse_fen(start_fen)
+    out = [zobrist(pos)]
+    for u in moves:
+        want = uci_to_move(u)
+        nxt = None
+        for m in legal_moves(pos):
+            if m == want:
+                nxt = m
+                break
+        if nxt is None:
+            break
+        pos, _ = make_move(pos, nxt)
+        out.append(zobrist(pos))
+    return out
+
+
 s = Searcher(NODES)
 while True:
     g = post("/game", {})
@@ -556,7 +600,8 @@ while True:
         mine = legal_moves(pos)
         mine_set = set(mine)
         cand = [m for m in legal if m in mine_set] or legal
-        mv = s.search_root(pos, cand)
+        hist = history_hashes(g["start_fen"], g["moves"])
+        mv = s.search_root(pos, cand, hist)
         g = post("/move", {"game": g["game"], "move": move_to_uci(mv)})
     print(f"game {g['game']}: {g['outcome']} by {g['reason']}", file=sys.stderr)
 print(f"done: {g.get('wins')} won, {g.get('draws')} drawn, {g.get('losses')} lost", file=sys.stderr)
