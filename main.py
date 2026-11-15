@@ -1,3 +1,9 @@
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
 """Dev version of the tiny-chess engine. Readable first; golf to main.py later.
 
 0x88 board. Pieces: white P=1 N=2 B=3 R=4 Q=5 K=6, black negative.
