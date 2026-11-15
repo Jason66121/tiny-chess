@@ -3,7 +3,6 @@ import os
 import sys
 import urllib.error
 import urllib.request
-
 """Dev version of the tiny-chess engine. Readable first; golf to main.py later.
 
 0x88 board. Pieces: white P=1 N=2 B=3 R=4 Q=5 K=6, black negative.
@@ -526,6 +525,8 @@ class Searcher:
                 alpha = stand
         moves = (legal_moves(pos) if in_check
                  else gen_moves(pos, captures_only=True))
+        if in_check and not moves:
+            return -100000 + ply  # checkmate at the horizon: was returning alpha
         for mv in self._order(pos, moves, ply):
             np, _ = make_move(pos, mv)
             if attacked(np.b, king_square(np.b, pos.turn), -pos.turn):
@@ -546,8 +547,7 @@ def move_to_uci(mv):
     return s
 
 
-
-ENV_URL =  os.environ.get("MAKEFUN_ENV_URL") or sys.exit("MAKEFUN_ENV_URL is not set")
+ENV_URL = os.environ.get("MAKEFUN_ENV_URL") or sys.exit("MAKEFUN_ENV_URL is not set")
 NODES = int(os.environ.get("CHESS_NODES", "60000"))
 
 
