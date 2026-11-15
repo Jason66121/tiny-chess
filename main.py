@@ -403,21 +403,26 @@ class Searcher:
         # iterative deepening: keep deepening while the node budget allows
         depth = 1
         while True:
-            val, mv = self._root(pos, legal, depth)
-            if self.count > self.nodes:
-                break
+            val, mv = self._root(pos, legal, depth, best)
             if mv is not None:
                 best, best_val = mv, val
+            if self.count > self.nodes:
+                break
             depth += 1
-            if depth > 64 or self.count > self.nodes:
+            if depth > 64:
                 break
         return best
 
-    def _root(self, pos, legal, depth):
+    def _root(self, pos, legal, depth, prev_best=None):
         alpha = -10**9
         best_mv = None
         best_val = -10**9
         ordered = self._order(pos, legal, 0)
+        # previous iteration's best first: if the budget dies mid-iteration,
+        # the partial result below still keeps a searched best move
+        if prev_best is not None and prev_best in ordered:
+            ordered.remove(prev_best)
+            ordered.insert(0, prev_best)
         for mv in ordered:
             np, _ = make_move(pos, mv)
             if attacked(np.b, king_square(np.b, pos.turn), -pos.turn):
@@ -460,6 +465,24 @@ class Searcher:
             depth += 1  # check extension: see the tactic through
         if depth <= 0:
             return self._quiesce(pos, alpha, beta, ply)
+        # transposition table, probed before null-move: a hit saves the NMP
+        # search. The stored move is used for ordering at any depth; the
+        # score cutoff only applies when the entry is at least as deep.
+        ent = self.tt.get(h)
+        tt_move = None
+        if ent:
+            _, flag, val, tt_move = ent
+            if ent[0] >= depth:
+                if val > 90000:
+                    val -= ply
+                elif val < -90000:
+                    val += ply
+                if flag == 0:
+                    return val
+                if flag == 1 and val >= beta:
+                    return val
+                if flag == 2 and val <= alpha:
+                    return val
         # Null-move pruning: skip a move (not in check, enough depth left);
         # a fail-high means this position is too good to need the move.
         if depth >= 3 and not in_check and beta < 99900:
@@ -469,17 +492,6 @@ class Searcher:
                 return beta
             if self.count > self.nodes:
                 return evaluate(pos)
-        # transposition table
-        ent = self.tt.get(h)
-        tt_move = None
-        if ent and ent[0] >= depth:
-            _, flag, val, tt_move = ent
-            if flag == 0:
-                return val
-            if flag == 1 and val >= beta:
-                return val
-            if flag == 2 and val <= alpha:
-                return val
         moves = legal_moves(pos)
         if not moves:
             if in_check:
@@ -492,9 +504,20 @@ class Searcher:
         best = -10**9
         best_mv = None
         orig_alpha = alpha
-        for mv in ordered:
-            np, _ = make_move(pos, mv)
-            v = -self._search(np, depth - 1, -beta, -alpha, ply + 1)
+        for i, mv in enumerate(ordered):
+            np, cap = make_move(pos, mv)
+            # late-move reduction: quiet late moves get a shallower look
+            # first; re-search at full depth if the shallow look is promising.
+            # Never reduce checks, captures, promotions, or the killer.
+            if (i > 2 and depth > 2 and not in_check and cap == 0
+                    and not mv[2] and self.killers.get(ply) != mv
+                    and not attacked(np.b, king_square(np.b, np.turn),
+                                     pos.turn)):
+                v = -self._search(np, depth - 2, -alpha - 1, -alpha, ply + 1)
+                if v > alpha:
+                    v = -self._search(np, depth - 1, -beta, -alpha, ply + 1)
+            else:
+                v = -self._search(np, depth - 1, -beta, -alpha, ply + 1)
             if self.count > self.nodes:
                 return best if best != -10**9 else evaluate(pos)
             if v > best:
@@ -511,7 +534,14 @@ class Searcher:
             flag = 2
         else:
             flag = 0
-        self.tt[h] = (depth, flag, best, best_mv)
+        # mate scores are root-relative (-100000+ply): adjust by ply so the
+        # stored value means the same when read back at another ply
+        store = best
+        if store > 90000:
+            store += ply
+        elif store < -90000:
+            store -= ply
+        self.tt[h] = (depth, flag, store, best_mv)
         return best
 
     def _quiesce(self, pos, alpha, beta, ply):
@@ -596,6 +626,7 @@ while True:
     g = post("/game", {})
     if g["status"] == "done":
         break
+    s.tt = {}  # fresh transposition table per game: no cross-game leakage
     while g["status"] == "your_move":
         pos = parse_fen(g["fen"])
         legal = [uci_to_move(u) for u in g["legal_moves"]]
